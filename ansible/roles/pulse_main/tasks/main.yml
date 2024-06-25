@@ -5,7 +5,7 @@
 
 - name: Set version for this playbook
   ansible.builtin.set_fact:
-    ROLE_VERSION: '1.1.1'
+    ROLE_VERSION: '1.1.0'
 
 - name: Display version
   ansible.builtin.debug:
@@ -23,9 +23,6 @@
     state: latest
     pkg:
       - python3-PyMySQL
-      - cron
-      - mariadb-client
-      - crudini
   when:
     - ansible_distribution == 'CentOS'
 
@@ -34,9 +31,6 @@
     state: latest
     pkg:
       - python3-pymysql
-      - cron
-      - mariadb-client
-      - crudini
   when:
     - ansible_distribution == 'Debian'
 
@@ -56,56 +50,35 @@
   when:
     - ansible_distribution == 'Debian'
 
-- name: PULSE/ITSM - Setup local apache as proxy for remote itsm
-  ansible.builtin.template:
-    src: itsm.conf.j2
-    dest: '{{ APACHE_CONF_PATH }}/itsm.conf'
-    mode: '0644'
-    backup: yes
-  notify:
-    - PULSE - Restart apache
-  when:
-    - ITSM_DBHOST != 'localhost'
+- name: GLPI - Restart Apache2
+  ansible.builtin.systemd:
+    name: apache2
+    state: restarted
 
-- name: PULSE/ITSM - Enable itsm apache config
-  ansible.builtin.command: a2enconf itsm
-  notify:
-    - PULSE - Restart apache
-  when:
-    - ansible_distribution == 'Debian'
-    - ITSM_DBHOST != 'localhost'
+- name: GLPI - Restart php
+  ansible.builtin.systemd:
+    name: php8.2-fpm
+    state: restarted
 
-- name: PULSE/ITSM - Allow access to ITSM API
-  community.mysql.mysql_query:
-    login_host: '{{ ITSM_DBHOST }}'
-    login_port: '{{ ITSM_DBPORT }}'
-    login_user: '{{ ITSM_DBUSER }}'
-    login_password: '{{ ITSM_DBPASSWD }}'
-    login_db: '{{ ITSM_DBNAME }}'
-    query:
-    - INSERT INTO glpi_apiclients (is_recursive, name, is_active, ipv4_range_start, ipv4_range_end) VALUES (1, 'full access from {{ IP_ADDRESS }}', 1, {{ IP_ADDRESS | ansible.utils.ipaddr('address') | ansible.utils.ipaddr('int') }}, {{ IP_ADDRESS | ansible.utils.ipaddr('address') | ansible.utils.ipaddr('int') }})
-    single_transaction: yes
-  vars:
-    ansible_ssh_user: root
-  delegate_to: '{{ ITSM_DBHOST }}'
-  when:
-    - ITSM_WRITEABLE
-    - ITSM_DBHOST != 'localhost'
+- name: PULSE/AGENT - Restart mariadb
+  ansible.builtin.systemd:
+    name: mariadb
+    state: restarted
 
-- name: PULSE/ITSM - Initialise session to API
+- name: PULSE/GLPI - Initialise session to API
   ansible.builtin.uri:
-    url: "{{ ITSM_BASEURL }}/apirest.php/initSession"
+    url: "http://localhost/{{ ITSM_TYPE }}/apirest.php/initSession"
     url_username: '{{ ITSM_API_USER }}'
     url_password: '{{ ITSM_API_PASSWORD }}'
     force_basic_auth: yes
     method: GET
   register: json_session
   when:
-    - ITSM_WRITEABLE
+    - ITSM_DBHOST == 'localhost'
 
-- name: PULSE/ITSM - Create entity in ITSM
+- name: PULSE/GLPI - Create entity in GLPI
   ansible.builtin.uri:
-    url: "{{ ITSM_BASEURL }}/apirest.php/Entity/"
+    url: "http://localhost/{{ ITSM_TYPE }}/apirest.php/Entity/"
     url_username: '{{ ITSM_API_USER }}'
     url_password: '{{ ITSM_API_PASSWORD }}'
     force_basic_auth: yes
@@ -120,9 +93,9 @@
   register: result
   failed_when: ('Duplicate entry' not in result.content) and (result.status != 201)
   when:
-    - ITSM_WRITEABLE
-    
-- name: PULSE/ITSM - Define created entity as default entity for fusioninventory
+    - ITSM_DBHOST == 'localhost'
+
+- name: PULSE/GLPI - Define created entity as default entity for fusioninventory
   community.mysql.mysql_query:
     login_host: '{{ ITSM_DBHOST }}'
     login_port: '{{ ITSM_DBPORT }}'
@@ -134,7 +107,7 @@
     - INSERT INTO glpi_rulecriterias (rules_id, criteria, `condition`, pattern) VALUES ((SELECT id FROM glpi_rules WHERE sub_type = 'PluginFusioninventoryInventoryRuleEntity'), 'tag', 0, '*')
     - INSERT INTO glpi_ruleactions (rules_id, action_type, field, value) VALUES ((SELECT id FROM glpi_rules WHERE sub_type = 'PluginFusioninventoryInventoryRuleEntity'), 'assign', 'entities_id', '1')
   when:
-    - ITSM_WRITEABLE
+    - ITSM_DBHOST == 'localhost'
     - result.status == 201
 
 - name: PULSE/AGENT - Configure the agent updatebackupclient plugin
@@ -152,6 +125,32 @@
   with_items:
     - /var/lib/pulse2/clients/generate-pulse-agent.sh --conf-xmppserver={{ SERVER_FQDN }} --conf-xmpppasswd={{ XMPP_MASTER_PASSWORD }} --aes-key={{ AES_KEY }} --xmpp-passwd={{ XMPP_MASTER_PASSWORD }} --chat-domain={{ XMPP_DOMAIN }} --ssh-port={{ CLIENTS_SSH_PORT }} --vnc-port={{ CLIENTS_VNC_PORT }}
     - /var/lib/pulse2/clients/generate-agent-package
+
+- name: GLPI - Restart Apache2
+  ansible.builtin.systemd:
+    name: apache2
+    state: restarted
+
+- name: GLPI - Restart php
+  ansible.builtin.systemd:
+    name: php8.2-fpm
+    state: restarted
+
+- name: PULSE/AGENT - Restart mariadb
+  ansible.builtin.systemd:
+    name: mariadb
+    state: restarted
+
+
+- name: Ensure mariadb is in a running state
+  service:
+    name: mariadb
+    state: started
+  register: mariadbDetails
+  until: mariadbDetails.status.ActiveState == "active"
+  retries: 10
+  delay: 20
+
 
 - name: PULSE/AGENT - Create the quick action that will deploy updatebackupclient.ini to the machines
   community.mysql.mysql_query:
@@ -279,8 +278,6 @@
     login_db: imaging
     query:
       - UPDATE Entity SET name = '{{ ORGANISATION }} > {{ ENTITY }}', uuid = 'UUID{{ res_queryentityglpi.query_result[0][0].id }}' WHERE id = 1
-  when:
-    - res_queryentityglpi.rowcount[0] != 0
 
 - name: PULSE/IMAGING - Find Entity from Imaging
   community.mysql.mysql_query:
@@ -363,19 +360,17 @@
     mode: '0644'
     backup: yes
 
-- name: PULSE/EJABBERD - Copy maintenance script
-  ansible.builtin.copy:
-    src: maintenance_ejabberd.sh
-    dest: /var/lib/pulse2/maintenance/
-    mode: '0755'
-    owner: root
+- name: PULSE/AGENT - Restart mariadb
+  ansible.builtin.systemd:
+    name: mariadb
+    state: restarted
 
-- name: PULSE/EJABBERD - Cron for maintenance jobs on ejabberd
-  ansible.builtin.cron:
-    name: "ejabberd maintenance"
-    cron_file: ejabberd_maintenance
-    day: "*"
-    minute: "0"
-    hour: "*/4"
-    user: root
-    job: "/var/lib/pulse2/maintenance/maintenance_ejabberd.sh &> /dev/null"
+
+- name: Ensure mariadb is in a running state
+  service:
+    name: mariadb
+    state: started
+  register: mariadbDetails
+  until: mariadbDetails.status.ActiveState == "active"
+  retries: 10
+  delay: 20
