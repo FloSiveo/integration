@@ -34,6 +34,15 @@
   when:
     - ansible_distribution == "Debian"
 
+- name: Ensure mariadb is in a running state
+  service:
+    name: mariadb
+    state: started
+  register: mariadbDetails
+  until: mariadbDetails.status.ActiveState == "active"
+  retries: 10
+  delay: 20
+
 - name: FILEBROWSER - Configure path in mmc xmppmaster
   community.general.ini_file:
     path: /etc/mmc/plugins/xmppmaster.ini.local
